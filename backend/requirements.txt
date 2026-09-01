@@ -1,0 +1,13 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+sqlalchemy>=2.0,<3
+python-multipart>=0.0.20,<1
+pymupdf>=1.25,<2
+python-docx>=1.1,<2
+spacy>=3.8,<4
+spacy-lookups-data>=1.0,<2
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+httpx>=0.28,<1
+openpyxl>=3.1,<4
+keyring>=25,<26
+pydantic-settings>=2.7,<3

@@ -1,0 +1,20 @@
+{
+  "name": "cet6-vocab-assistant-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "lucide-vue-next": "^0.468.0",
+    "markdown-it": "^15.0.0",
+    "pinia": "^3.0.3",
+    "vite": "^7.1.2",
+    "vue": "^3.5.18",
+    "vue-router": "^4.5.1"
+  }
+}
