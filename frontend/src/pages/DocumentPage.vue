@@ -15,16 +15,19 @@ import {
   Search,
   SlidersHorizontal,
   Sparkles,
+  Volume2,
   X,
 } from "lucide-vue-next";
 import MarkdownIt from "markdown-it";
 import { computed, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 
 import { api } from "../api";
+import { useSpeech } from "../composables/useSpeech";
 import { useAppStore } from "../stores/app";
 
 const route = useRoute();
+const router = useRouter();
 const store = useAppStore();
 const documentId = route.params.id;
 const document = ref(null);
@@ -38,6 +41,8 @@ const search = ref("");
 const scope = ref("study");
 const level = ref("cet6");
 const status = ref("all");
+const minFrequency = ref(0);
+const reviewFilter = ref("all");
 const selected = ref(null);
 const detailLoading = ref(false);
 const translating = ref(false);
@@ -48,6 +53,13 @@ const chatReply = ref("");
 const chatting = ref(false);
 const statusUpdating = ref(new Set());
 let searchTimer;
+
+const studyDialogOpen = ref(false);
+const studyMode = ref("daily");
+const studyOrder = ref("frequency");
+const studyDuration = ref(20);
+const customDuration = ref("");
+const durationPresets = [0, 15, 20, 30, 45, 60];
 
 const markdown = new MarkdownIt({
   html: false,
@@ -75,6 +87,20 @@ const pageEnd = computed(() => Math.min(page.value * pageSize, total.value));
 const renderedChatReply = computed(() =>
   chatReply.value ? markdown.render(chatReply.value) : "",
 );
+const filterSummary = computed(() => {
+  const parts = [];
+  parts.push(scope.value === "study" ? "学习范围" : "全文");
+  parts.push({ cet6: "六级新增", cet4: "四级基础", all: "四级＋六级" }[level.value] || "六级新增");
+  if (status.value !== "all") {
+    parts.push({ new: "未学习", learning: "学习中", mastered: "已掌握", suspended: "已忽略" }[status.value]);
+  }
+  if (minFrequency.value > 0) parts.push(`出现≥${minFrequency.value}次`);
+  if (reviewFilter.value !== "all") {
+    parts.push({ none: "未复习", min1: "复习≥1次", min3: "复习≥3次", min5: "复习≥5次" }[reviewFilter.value]);
+  }
+  if (search.value.trim()) parts.push(`搜索"${search.value.trim()}"`);
+  return parts.join(" · ");
+});
 
 const loadDocument = async () => {
   document.value = await api.get(`/api/question-sets/${documentId}`);
@@ -87,6 +113,8 @@ const loadWords = async () => {
     level: level.value,
     status: status.value,
     search: search.value,
+    min_frequency: String(minFrequency.value),
+    review_filter: reviewFilter.value,
     page: String(page.value),
     page_size: String(pageSize),
   });
@@ -99,6 +127,42 @@ const loadWords = async () => {
   } finally {
     loading.value = false;
   }
+};
+
+const formatReviewTime = (iso) => {
+  if (!iso) return "";
+  const date = new Date(/Z$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : `${iso}Z`);
+  if (Number.isNaN(date.getTime())) return "";
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${month}月${day}日 ${hour}:${minute}`;
+};
+
+const startStudy = () => {
+  let duration = studyDuration.value;
+  if (duration === -1) {
+    const parsed = Number(customDuration.value);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 240) {
+      store.notify("请输入 1–240 之间的分钟数", "error");
+      return;
+    }
+    duration = Math.floor(parsed);
+  }
+  const params = new URLSearchParams({
+    level: level.value,
+    mode: studyMode.value,
+    order: studyOrder.value,
+    duration: String(duration),
+    scope: scope.value,
+    status: status.value,
+    min_frequency: String(minFrequency.value),
+    review_filter: reviewFilter.value,
+    search: search.value,
+  });
+  studyDialogOpen.value = false;
+  router.push(`/documents/${documentId}/study?${params}`);
 };
 
 const loadBlocks = async () => {
@@ -125,6 +189,13 @@ const openWord = async (word) => {
   } finally {
     detailLoading.value = false;
   }
+};
+
+// 朗读抽屉中的单词与例句
+const { speak, stop: stopSpeech, speakingId, supported: speechSupported } = useSpeech();
+const closeWordDrawer = () => {
+  stopSpeech();
+  selected.value = null;
 };
 
 const translateExamples = async () => {
@@ -235,7 +306,7 @@ const resetPageAndLoadWords = () => {
   else page.value = 1;
 };
 
-watch([scope, level, status], resetPageAndLoadWords);
+watch([scope, level, status, minFrequency, reviewFilter], resetPageAndLoadWords);
 watch(page, loadWords);
 watch(search, () => {
   window.clearTimeout(searchTimer);
@@ -269,9 +340,9 @@ onMounted(async () => {
           <a class="button secondary" :href="`/api/export/${document.id}`">
             <Download :size="17" /> 导出 Excel
           </a>
-          <RouterLink class="button primary" :to="`/documents/${document.id}/study?level=${level}`">
+          <button class="button primary" @click="studyDialogOpen = true">
             <BookMarked :size="17" /> 开始学习
-          </RouterLink>
+          </button>
         </div>
       </div>
       <div class="document-kpis">
@@ -321,6 +392,28 @@ onMounted(async () => {
           </select>
           <ChevronDown :size="15" />
         </label>
+        <label class="select-field">
+          <span>出现频率</span>
+          <select v-model.number="minFrequency">
+            <option :value="0">全部</option>
+            <option :value="2">≥ 2 次</option>
+            <option :value="3">≥ 3 次</option>
+            <option :value="5">≥ 5 次</option>
+            <option :value="10">≥ 10 次</option>
+          </select>
+          <ChevronDown :size="15" />
+        </label>
+        <label class="select-field">
+          <span>复习次数</span>
+          <select v-model="reviewFilter">
+            <option value="all">全部</option>
+            <option value="none">未复习</option>
+            <option value="min1">≥ 1 次</option>
+            <option value="min3">≥ 3 次</option>
+            <option value="min5">≥ 5 次</option>
+          </select>
+          <ChevronDown :size="15" />
+        </label>
       </div>
 
       <div v-if="loading" class="loading-panel"><LoaderCircle class="spin" :size="23" /> 正在统计词频</div>
@@ -351,6 +444,7 @@ onMounted(async () => {
               <th>释义</th>
               <th class="numeric">出现</th>
               <th class="numeric">正文</th>
+              <th class="numeric">复习</th>
               <th>掌握状态</th>
               <th></th>
             </tr>
@@ -365,6 +459,9 @@ onMounted(async () => {
               <td class="definition-cell">{{ word.definition || "暂无释义" }}</td>
               <td class="numeric frequency-cell">{{ word.frequency }}</td>
               <td class="numeric">{{ word.passage_frequency }}</td>
+              <td class="numeric review-count-cell" :class="{ zero: !word.review_count }">
+                {{ word.review_count || 0 }}
+              </td>
               <td>
                 <button
                   class="mastery-pill mastery-button"
@@ -424,14 +521,31 @@ onMounted(async () => {
     </section>
 
     <Transition name="drawer">
-      <div v-if="selected" class="drawer-backdrop" @click.self="selected = null">
+      <div v-if="selected" class="drawer-backdrop" @click.self="closeWordDrawer">
         <aside class="word-drawer">
-          <button class="drawer-close" @click="selected = null"><X :size="20" /></button>
+          <button class="drawer-close" @click="closeWordDrawer"><X :size="20" /></button>
           <div class="drawer-word">
             <p class="eyebrow">CONTEXT CARD</p>
-            <h2>{{ selected.word.lemma }}</h2>
+            <div class="drawer-word-row">
+              <h2>{{ selected.word.lemma }}</h2>
+              <button
+                v-if="speechSupported"
+                class="speak-button"
+                :class="{ active: speakingId === 'drawer-word' }"
+                aria-label="朗读单词"
+                @click="speak(selected.word.lemma, { id: 'drawer-word' })"
+              >
+                <Volume2 :size="17" />
+              </button>
+            </div>
             <p class="phonetic" v-if="selected.word.phonetic">/{{ selected.word.phonetic.split('|')[0] }}/</p>
             <div class="word-meta"><span class="pos-chip">{{ selected.word.pos_label || selected.word.pos }}</span>{{ selected.word.definition }}</div>
+            <div class="word-review-meta">
+              <span class="review-chip">本单词已复习 {{ selected.word.review_count || 0 }} 次</span>
+              <span v-if="selected.word.next_review_at" class="review-chip next">
+                下次复习 {{ formatReviewTime(selected.word.next_review_at) }}
+              </span>
+            </div>
             <div class="drawer-actions">
               <button
                 class="button small secondary"
@@ -452,6 +566,15 @@ onMounted(async () => {
             <article v-for="example in selected.examples" :key="example.id" class="example-card">
               <div class="example-labels">
                 <span>P.{{ example.page }}</span><span>{{ typeLabels[example.content_type] }}</span>
+                <button
+                  v-if="speechSupported"
+                  class="speak-button small"
+                  :class="{ active: speakingId === `drawer-ex-${example.id}` }"
+                  aria-label="朗读例句"
+                  @click="speak(example.text, { id: `drawer-ex-${example.id}`, rate: 0.9 })"
+                >
+                  <Volume2 :size="13" />
+                </button>
               </div>
               <p>{{ example.text }}</p>
               <p v-if="example.translation" class="translation">{{ example.translation }}</p>
@@ -476,6 +599,100 @@ onMounted(async () => {
             ></div>
           </div>
         </aside>
+      </div>
+    </Transition>
+
+    <Transition name="drawer">
+      <div v-if="studyDialogOpen" class="modal-backdrop" @click.self="studyDialogOpen = false">
+        <div class="study-setup-modal" role="dialog" aria-label="学习设置">
+          <header>
+            <div>
+              <p class="eyebrow">STUDY SETUP</p>
+              <h2>开始学习</h2>
+            </div>
+            <button class="drawer-close" aria-label="关闭" @click="studyDialogOpen = false">
+              <X :size="18" />
+            </button>
+          </header>
+
+          <p class="study-scope-line">
+            <SlidersHorizontal :size="14" />
+            学习范围：{{ filterSummary }} · 共 {{ total }} 词条
+            <small v-if="status === 'all'">（已掌握与已忽略不会进入学习）</small>
+          </p>
+
+          <section>
+            <h3>学习模式</h3>
+            <div class="option-grid">
+              <label class="option-card" :class="{ active: studyMode === 'daily' }">
+                <input v-model="studyMode" type="radio" value="daily" />
+                <strong>每日任务</strong>
+                <small>筛选范围内的到期复习词 + 最多 20 个新词</small>
+              </label>
+              <label class="option-card" :class="{ active: studyMode === 'free' }">
+                <input v-model="studyMode" type="radio" value="free" />
+                <strong>自由学习</strong>
+                <small>筛选范围内可学习的词汇，一口气过完</small>
+              </label>
+            </div>
+          </section>
+
+          <section>
+            <h3>学习顺序<span>每日任务模式下应用于新词部分</span></h3>
+            <div class="option-grid">
+              <label class="option-card" :class="{ active: studyOrder === 'frequency' }">
+                <input v-model="studyOrder" type="radio" value="frequency" />
+                <strong>按出现频率</strong>
+                <small>高频词优先，先抓重点</small>
+              </label>
+              <label class="option-card" :class="{ active: studyOrder === 'review_count' }">
+                <input v-model="studyOrder" type="radio" value="review_count" />
+                <strong>按复习次数</strong>
+                <small>复习次数多的优先，集中攻坚薄弱词</small>
+              </label>
+            </div>
+          </section>
+
+          <section>
+            <h3>学习时长<span>到时自动退出并保存学习进度</span></h3>
+            <div class="duration-pills">
+              <button
+                v-for="preset in durationPresets"
+                :key="preset"
+                :class="{ active: studyDuration === preset }"
+                type="button"
+                @click="studyDuration = preset"
+              >
+                {{ preset === 0 ? "不限时" : `${preset} 分钟` }}
+              </button>
+              <button
+                :class="{ active: studyDuration === -1 }"
+                type="button"
+                @click="studyDuration = -1"
+              >
+                自定义
+              </button>
+            </div>
+            <div v-if="studyDuration === -1" class="custom-duration">
+              <input
+                v-model="customDuration"
+                type="number"
+                min="1"
+                max="240"
+                placeholder="1–240"
+                aria-label="自定义学习分钟数"
+              />
+              <span>分钟</span>
+            </div>
+          </section>
+
+          <footer>
+            <button class="button secondary" type="button" @click="studyDialogOpen = false">取消</button>
+            <button class="button primary" type="button" @click="startStudy">
+              <BookMarked :size="16" /> 开始学习
+            </button>
+          </footer>
+        </div>
       </div>
     </Transition>
   </div>

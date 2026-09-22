@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 import uuid
 from collections import defaultdict
@@ -19,9 +20,10 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import distinct, func, or_, select
+from pydantic import BaseModel, Field
+from sqlalchemy import distinct, func, select, text
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -99,9 +101,38 @@ def seed_defaults(session: Session) -> None:
     session.commit()
 
 
+# 艾宾浩斯记忆曲线：相邻两次复习的间隔天数，累计约 1/2/4/7/15/30 天
+EBBINGHAUS_INTERVAL_DAYS = [1, 1, 2, 3, 8, 15]
+# 每日任务的固定新词数量
+DAILY_NEW_WORD_LIMIT = 20
+
+
+def run_migrations() -> None:
+    """为旧版本数据库补充新增列（create_all 不会修改已有表结构）。"""
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(user_vocab)"))}
+        if "review_count" not in columns:
+            conn.execute(
+                text("ALTER TABLE user_vocab ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0")
+            )
+        if "ebbinghaus_stage" not in columns:
+            conn.execute(
+                text("ALTER TABLE user_vocab ADD COLUMN ebbinghaus_stage INTEGER NOT NULL DEFAULT 0")
+            )
+        if "last_success_date" not in columns:
+            conn.execute(
+                text("ALTER TABLE user_vocab ADD COLUMN last_success_date TEXT")
+            )
+        # 掌握即毕业：清除历史遗留的已掌握词的曲线计划，避免到期后被每日任务召回
+        conn.execute(
+            text("UPDATE user_vocab SET next_review_at = NULL WHERE status = 'mastered'")
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     Base.metadata.create_all(engine)
+    run_migrations()
     with Session(engine) as session:
         seed_defaults(session)
     get_vocabulary()
@@ -356,6 +387,8 @@ def _word_stats_rows(
     level: str,
     status: str,
     search: str,
+    min_frequency: int = 0,
+    review_filter: str = "all",
 ) -> list[dict]:
     vocab = get_vocabulary()
     stats = session.scalars(
@@ -367,8 +400,10 @@ def _word_stats_rows(
         )
     ).all()
     statuses_by_lemma: dict[str, list[str]] = defaultdict(list)
+    reviews_by_lemma: dict[str, int] = defaultdict(int)
     for row in session.scalars(select(UserVocab)).all():
         statuses_by_lemma[row.lemma].append(row.status)
+        reviews_by_lemma[row.lemma] += row.review_count or 0
     grouped: dict[str, dict] = {}
     for stat_row in stats:
         entry = vocab.get(stat_row.lemma)
@@ -393,6 +428,7 @@ def _word_stats_rows(
                 "total_frequency": 0,
                 "passage_frequency": 0,
                 "question_frequency": 0,
+                "review_count": reviews_by_lemma.get(stat_row.lemma, 0),
                 "_primary_frequency": -1,
                 **entry_payload(entry),
             },
@@ -416,6 +452,16 @@ def _word_stats_rows(
             statuses_by_lemma.get(word["lemma"], [])
         )
         word.pop("_primary_frequency", None)
+        if word["frequency"] < min_frequency:
+            continue
+        if review_filter == "none" and word["review_count"] > 0:
+            continue
+        if review_filter == "min1" and word["review_count"] < 1:
+            continue
+        if review_filter == "min3" and word["review_count"] < 3:
+            continue
+        if review_filter == "min5" and word["review_count"] < 5:
+            continue
         if status != "all" and word["status"] != status:
             continue
         payload.append(word)
@@ -430,12 +476,21 @@ def list_word_stats(
     level: str = Query("cet6", pattern="^(cet6|cet4|all)$"),
     status: str = Query("all", pattern="^(all|new|learning|mastered|suspended)$"),
     search: str = "",
+    min_frequency: int = Query(0, ge=0, le=999),
+    review_filter: str = Query("all", pattern="^(all|none|min1|min3|min5)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=10, le=200),
     session: Session = Depends(get_db),
 ) -> dict:
     rows = _word_stats_rows(
-        session, question_set_id, scope, level, status, search.strip()
+        session,
+        question_set_id,
+        scope,
+        level,
+        status,
+        search.strip(),
+        min_frequency=min_frequency,
+        review_filter=review_filter,
     )
     start = (page - 1) * page_size
     return {
@@ -508,12 +563,19 @@ def list_examples(word_stat_id: int, session: Session = Depends(get_db)) -> dict
             ).all()
         )
     )
+    vocab_rows = session.scalars(
+        select(UserVocab).where(UserVocab.lemma == stat_row.lemma)
+    ).all()
+    review_count = sum(row.review_count or 0 for row in vocab_rows)
+    upcoming = [row.next_review_at for row in vocab_rows if row.next_review_at]
     return {
         "word": {
             "lemma": stat_row.lemma,
             "pos": stat_row.pos,
             "pos_values": pos_values,
             "pos_label": " · ".join(pos_values),
+            "review_count": review_count,
+            "next_review_at": min(upcoming).isoformat() if upcoming else None,
             **entry_payload(entry),
         },
         "examples": examples_for_word(
@@ -526,11 +588,64 @@ def list_examples(word_stat_id: int, session: Session = Depends(get_db)) -> dict
 def study_queue(
     question_set_id: int,
     level: str = Query("cet6", pattern="^(cet6|cet4|all)$"),
+    order: str = Query("frequency", pattern="^(frequency|review_count)$"),
+    mode: str = Query("free", pattern="^(free|daily)$"),
+    scope: str = Query("study", pattern="^(study|all)$"),
+    status: str = Query("all", pattern="^(all|new|learning|mastered|suspended)$"),
+    search: str = "",
+    min_frequency: int = Query(0, ge=0),
+    review_filter: str = Query("all", pattern="^(all|none|min1|min3|min5)$"),
     session: Session = Depends(get_db),
 ) -> list[dict]:
+    # 学习队列跟随词频表当前筛选（所见即所学）
     rows = _word_stats_rows(
-        session, question_set_id, "study", level, "all", ""
+        session, question_set_id, scope, level, status, search,
+        min_frequency, review_filter,
     )
+
+    def order_key(row: dict) -> tuple:
+        if order == "review_count":
+            return (-row["review_count"], -row["frequency"], row["lemma"])
+        return (-row["frequency"], row["lemma"])
+
+    if mode == "daily":
+        now = datetime.utcnow()
+        due_rows = session.execute(
+            select(UserVocab.lemma, func.min(UserVocab.next_review_at))
+            .where(
+                UserVocab.next_review_at.is_not(None),
+                UserVocab.next_review_at <= now,
+            )
+            .group_by(UserVocab.lemma)
+        ).all()
+        due_at = {lemma: earliest for lemma, earliest in due_rows}
+        # 到期复习词：按记忆曲线最久到期优先，已忽略和已掌握的除外（掌握即毕业）
+        due_words = [
+            row
+            for row in rows
+            if row["lemma"] in due_at
+            and row["status"] not in {"suspended", "mastered"}
+        ]
+        due_words.sort(key=lambda row: (due_at[row["lemma"]], row["lemma"]))
+        # 固定 20 个新词，其余均为到期复习词
+        new_words = [
+            row
+            for row in rows
+            if row["status"] == "new" and row["lemma"] not in due_at
+        ]
+        new_words.sort(key=order_key)
+        selected_rows = due_words + new_words[:DAILY_NEW_WORD_LIMIT]
+    else:
+        if status == "all":
+            # 状态未筛选：默认跳过已掌握与已忽略
+            selected_rows = [
+                row for row in rows if row["status"] not in {"mastered", "suspended"}
+            ]
+        else:
+            # 显式状态筛选：所见即所学（如筛选"已掌握"可重测）
+            selected_rows = list(rows)
+        selected_rows.sort(key=order_key)
+
     return [
         {
             **row,
@@ -538,8 +653,7 @@ def study_queue(
                 session, question_set_id, row["lemma"], limit=3
             ),
         }
-        for row in rows
-        if row["status"] not in {"mastered", "suspended"}
+        for row in selected_rows
     ]
 
 
@@ -560,6 +674,11 @@ def set_vocab_status(
     if body.status == "new":
         row.success_count = 0
         row.next_review_at = None
+        row.ebbinghaus_stage = 0
+        row.last_success_date = None
+    elif body.status == "mastered":
+        # 手动标记掌握同样视为毕业，终止曲线计划
+        row.next_review_at = None
     session.commit()
     return {"lemma": row.lemma, "pos": row.pos, "status": row.status}
 
@@ -576,18 +695,40 @@ def record_review(body: ReviewAnswer, session: Session = Depends(get_db)) -> dic
         session.add(row)
         session.flush()
     previous = row.status
+    now = datetime.utcnow()
+    was_due = row.next_review_at is not None and row.next_review_at <= now
+    row.review_count = (row.review_count or 0) + 1
     if body.known:
-        row.success_count += 1
+        # 当天重复认识只计 1 次：跨天累计 3 次才掌握
+        today = datetime.now().date().isoformat()
+        if row.last_success_date != today:
+            row.success_count += 1
+            row.last_success_date = today
         row.status = "mastered" if row.success_count >= 3 else "learning"
-        row.next_review_at = datetime.utcnow() + timedelta(
-            days=7 if row.status == "mastered" else 1
-        )
+        if row.status == "mastered":
+            # 掌握即毕业：曲线计划终止，不再安排后续复习
+            row.next_review_at = None
+        elif was_due:
+            # 到期复习完成，进入下一阶段（间隔 1/1/2/3/8/15 天）
+            row.ebbinghaus_stage += 1
+            if row.ebbinghaus_stage >= len(EBBINGHAUS_INTERVAL_DAYS):
+                row.next_review_at = None
+            else:
+                row.next_review_at = now + timedelta(
+                    days=EBBINGHAUS_INTERVAL_DAYS[row.ebbinghaus_stage]
+                )
+        elif row.ebbinghaus_stage == 0 and row.next_review_at is None:
+            # 首次学习，按记忆曲线安排第 1 天复习
+            row.next_review_at = now + timedelta(days=EBBINGHAUS_INTERVAL_DAYS[0])
+        # 未到期的额外练习不改变曲线计划
         result = "known"
     else:
         row.success_count = 0
         row.lapse_count += 1
         row.status = "learning"
-        row.next_review_at = datetime.utcnow() + timedelta(minutes=5)
+        # 不认识：记忆曲线从头开始，次日再复习
+        row.ebbinghaus_stage = 0
+        row.next_review_at = now + timedelta(days=EBBINGHAUS_INTERVAL_DAYS[0])
         result = "unknown"
     session.add(
         ReviewEvent(
@@ -606,6 +747,8 @@ def record_review(body: ReviewAnswer, session: Session = Depends(get_db)) -> dic
         "status": row.status,
         "success_count": row.success_count,
         "lapse_count": row.lapse_count,
+        "review_count": row.review_count,
+        "ebbinghaus_stage": row.ebbinghaus_stage,
         "next_review_at": row.next_review_at.isoformat() if row.next_review_at else None,
     }
 
@@ -615,9 +758,12 @@ def corpus_word_stats(
     level: str = Query("cet6", pattern="^(cet6|cet4|all)$"),
     status: str = Query("all", pattern="^(all|new|learning|mastered|suspended)$"),
     search: str = "",
-    limit: int = Query(200, ge=20, le=1000),
+    min_frequency: int = Query(0, ge=0, le=999),
+    review_filter: str = Query("all", pattern="^(all|none|min1|min3|min5)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=10, le=200),
     session: Session = Depends(get_db),
-) -> list[dict]:
+) -> dict:
     rows = session.execute(
         select(
             WordStat.lemma,
@@ -632,16 +778,29 @@ def corpus_word_stats(
     for lemma, pos in session.execute(select(WordStat.lemma, WordStat.pos).distinct()).all():
         pos_values_by_lemma[lemma].append(pos)
     statuses_by_lemma: dict[str, list[str]] = defaultdict(list)
+    reviews_by_lemma: dict[str, int] = defaultdict(int)
     for row in session.scalars(select(UserVocab)).all():
         statuses_by_lemma[row.lemma].append(row.status)
+        reviews_by_lemma[row.lemma] += row.review_count or 0
     vocab = get_vocabulary()
     payload = []
     for lemma, total_frequency, study_frequency, document_frequency in rows:
         entry = vocab.get(lemma)
         mastery = aggregate_vocab_status(statuses_by_lemma.get(lemma, []))
+        review_count = reviews_by_lemma.get(lemma, 0)
         if not entry or not vocab.in_level(lemma, level):
             continue
         if status != "all" and mastery != status:
+            continue
+        if study_frequency < min_frequency:
+            continue
+        if review_filter == "none" and review_count > 0:
+            continue
+        if review_filter == "min1" and review_count < 1:
+            continue
+        if review_filter == "min3" and review_count < 3:
+            continue
+        if review_filter == "min5" and review_count < 5:
             continue
         if search and search.lower() not in lemma.lower() and search not in entry.chinese:
             continue
@@ -653,13 +812,79 @@ def corpus_word_stats(
                 "total_frequency": int(total_frequency or 0),
                 "study_frequency": int(study_frequency or 0),
                 "document_frequency": int(document_frequency or 0),
+                "review_count": review_count,
                 "status": mastery,
                 **entry_payload(entry),
             }
         )
-        if len(payload) >= limit:
-            break
-    return payload
+    start = (page - 1) * page_size
+    return {
+        "items": payload[start : start + page_size],
+        "total": len(payload),
+    }
+
+
+@app.get("/api/corpus/word-stats/{lemma}/examples")
+def corpus_examples(lemma: str, session: Session = Depends(get_db)) -> dict:
+    lemma = lemma.strip().lower()
+    entry = get_vocabulary().get(lemma)
+    pos_values = sorted(
+        set(
+            session.scalars(
+                select(WordStat.pos).where(WordStat.lemma == lemma)
+            ).all()
+        )
+    )
+    sentences = session.scalars(
+        select(Sentence)
+        .join(WordOccurrence, WordOccurrence.sentence_id == Sentence.id)
+        .where(WordOccurrence.lemma == lemma)
+        .distinct()
+        .order_by(Sentence.question_set_id, Sentence.sentence_index)
+    ).all()
+    question_sets = {
+        row.id: row.title
+        for row in session.scalars(select(QuestionSet)).all()
+    }
+    hashes = [sentence.normalized_hash for sentence in sentences]
+    translations: dict[str, SentenceTranslation] = {}
+    if hashes:
+        for translation in session.scalars(
+            select(SentenceTranslation)
+            .where(SentenceTranslation.sentence_hash.in_(hashes))
+            .order_by(SentenceTranslation.created_at.desc())
+        ).all():
+            translations.setdefault(translation.sentence_hash, translation)
+    vocab_rows = session.scalars(
+        select(UserVocab).where(UserVocab.lemma == lemma)
+    ).all()
+    review_count = sum(row.review_count or 0 for row in vocab_rows)
+    upcoming = [row.next_review_at for row in vocab_rows if row.next_review_at]
+    return {
+        "word": {
+            "lemma": lemma,
+            "pos_values": pos_values,
+            "pos_label": " · ".join(pos_values),
+            "review_count": review_count,
+            "next_review_at": min(upcoming).isoformat() if upcoming else None,
+            **entry_payload(entry),
+        },
+        "examples": [
+            {
+                "id": sentence.id,
+                "text": sentence.text,
+                "translation": translations.get(sentence.normalized_hash).translation
+                if translations.get(sentence.normalized_hash)
+                else None,
+                "content_type": sentence.content_type,
+                "section_name": sentence.section_name,
+                "page": sentence.block.page.page_index + 1,
+                "question_set_id": sentence.question_set_id,
+                "question_set_title": question_sets.get(sentence.question_set_id, ""),
+            }
+            for sentence in sentences
+        ],
+    }
 
 
 @app.get("/api/export/{question_set_id}")
@@ -799,6 +1024,49 @@ async def test_model_config(
     mark_test_result(config, success, message)
     session.commit()
     return {"success": success, "message": message}
+
+
+# 朗读：优先使用微软 Edge 神经网络语音（edge-tts，免费、无需 API key），磁盘缓存避免重复合成
+try:
+    import edge_tts
+except ImportError:  # 未安装时接口返回 503，前端自动回退浏览器本地语音
+    edge_tts = None
+
+TTS_VOICE = "en-US-AvaNeural"  # 微软神经网络女声，自然度远超系统本地语音
+TTS_CACHE_DIR = settings.data_dir / "tts_cache"
+TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    rate: str = Field(default="+0%", pattern=r"^[+-]\d+%$")
+
+
+@app.post("/api/tts")
+async def tts(body: TTSRequest) -> Response:
+    if edge_tts is None:
+        raise HTTPException(503, "edge-tts 未安装，请执行 pip install edge-tts")
+    cache_key = hashlib.sha256(
+        f"{TTS_VOICE}|{body.rate}|{body.text}".encode()
+    ).hexdigest()
+    cache_file = TTS_CACHE_DIR / f"{cache_key}.mp3"
+    if cache_file.exists():
+        return Response(content=cache_file.read_bytes(), media_type="audio/mpeg")
+    try:
+        communicate = edge_tts.Communicate(
+            text=body.text, voice=TTS_VOICE, rate=body.rate
+        )
+        audio = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio.write(chunk["data"])
+        data = audio.getvalue()
+    except Exception as exc:  # 网络异常等，前端会回退本地语音
+        raise HTTPException(502, f"语音合成失败: {exc}") from exc
+    if not data:
+        raise HTTPException(502, "语音合成返回空音频")
+    cache_file.write_bytes(data)
+    return Response(content=data, media_type="audio/mpeg")
 
 
 @app.post("/api/translate")

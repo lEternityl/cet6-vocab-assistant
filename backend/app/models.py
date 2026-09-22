@@ -164,7 +164,10 @@ class UserVocab(Base):
     status: Mapped[str] = mapped_column(String(24), default="new", index=True)
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     lapse_count: Mapped[int] = mapped_column(Integer, default=0)
+    review_count: Mapped[int] = mapped_column(Integer, default=0)
+    ebbinghaus_stage: Mapped[int] = mapped_column(Integer, default=0)
     next_review_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_success_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
