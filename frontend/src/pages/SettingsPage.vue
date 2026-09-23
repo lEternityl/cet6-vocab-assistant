@@ -107,13 +107,13 @@ onMounted(load);
 <template>
   <div class="page settings-page">
     <header class="page-header settings-header">
-      <div><p class="eyebrow">LOCAL AI SETTINGS</p><h1>模型是工具，语境才是主角。</h1><p class="lead">翻译和阅读问答可使用不同模型；密钥写入系统钥匙串，不进入数据库。</p></div>
+      <div><p class="eyebrow">LOCAL AI SETTINGS</p><h1>模型是工具，语境才是主角。</h1><p class="lead">翻译和阅读问答可使用不同模型；API Key 随配置保存在本地数据库。</p></div>
       <button class="button primary" @click="openCreate"><Plus :size="17" /> 添加模型</button>
     </header>
 
     <section class="security-note">
       <span><ShieldCheck :size="23" /></span>
-      <div><strong>本地优先的密钥策略</strong><p>前端永不读取已保存密钥；服务器日志也不会输出 Authorization 内容。若系统钥匙串不可用，可设置 CET6_API_KEY 环境变量。</p></div>
+      <div><strong>密钥由你填写、你掌控</strong><p>API Key 仅保存在本机数据库，前端永不回显已保存的密钥；服务器日志也不会输出 Authorization 内容。也可用 CET6_API_KEY 环境变量作为全局备用。</p></div>
     </section>
 
     <div v-if="loading" class="loading-panel"><LoaderCircle class="spin" /> 正在读取配置</div>
@@ -127,7 +127,7 @@ onMounted(load);
         <div class="model-name">{{ config.model_name }}</div>
         <dl>
           <div><dt><Server :size="14" /> API 地址</dt><dd>{{ config.base_url }}</dd></div>
-          <div><dt><KeyRound :size="14" /> API Key</dt><dd>{{ config.has_api_key ? "已存入钥匙串" : "未设置" }}</dd></div>
+          <div><dt><KeyRound :size="14" /> API Key</dt><dd>{{ config.has_api_key ? "已保存" : "未设置" }}</dd></div>
           <div><dt>参数</dt><dd>temperature {{ config.temperature }} · {{ config.max_tokens }} tokens · {{ config.enable_thinking ? "思考开启" : "思考关闭" }}</dd></div>
         </dl>
         <footer>

@@ -49,7 +49,7 @@ def choose_model_config(
 
 
 async def completion(config: ModelConfig, messages: list[dict]) -> str:
-    api_key = config.api_key or get_api_key(config.secret_ref)
+    api_key = config.api_key or get_api_key()
     if not api_key:
         raise ValueError("未找到 API Key，请在设置中保存或设置 CET6_API_KEY")
     base_url = validate_base_url(config.base_url)

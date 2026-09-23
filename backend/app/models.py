@@ -231,7 +231,6 @@ class ModelConfig(Base):
     enable_thinking: Mapped[bool] = mapped_column(Boolean, default=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    secret_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_test_status: Mapped[str] = mapped_column(String(24), default="untested")
     last_test_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

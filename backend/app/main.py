@@ -61,7 +61,6 @@ from .services.ai import (
 )
 from .services.exporter import export_question_set
 from .services.processor import process_question_set, rebuild_word_stats
-from .services.secrets import get_api_key
 from .services.vocabulary import VocabEntry, get_vocabulary
 
 
@@ -127,19 +126,14 @@ def run_migrations() -> None:
         conn.execute(
             text("UPDATE user_vocab SET next_review_at = NULL WHERE status = 'mastered'")
         )
-        # 模型配置：API Key 改存数据库（api_key 列），旧钥匙串数据自动迁入
+        # 模型配置：API Key 改存数据库（api_key 列）
         model_columns = {
             row[1] for row in conn.execute(text("PRAGMA table_info(model_configs)"))
         }
         if "api_key" not in model_columns:
             conn.execute(text("ALTER TABLE model_configs ADD COLUMN api_key TEXT"))
-    with Session(engine) as session:
-        for config in session.scalars(select(ModelConfig)).all():
-            if not config.api_key and config.secret_ref:
-                config.api_key = get_api_key(config.secret_ref)
-                if config.api_key:
-                    config.secret_ref = None  # 已迁入数据库，解除钥匙串引用
-        session.commit()
+        # 钥匙串方案已移除，清掉历史遗留的引用字段
+        conn.execute(text("UPDATE model_configs SET secret_ref = NULL"))
 
 
 @asynccontextmanager
