@@ -61,7 +61,7 @@ from .services.ai import (
 )
 from .services.exporter import export_question_set
 from .services.processor import process_question_set, rebuild_word_stats
-from .services.secrets import delete_api_key, set_api_key
+from .services.secrets import get_api_key
 from .services.vocabulary import VocabEntry, get_vocabulary
 
 
@@ -127,6 +127,19 @@ def run_migrations() -> None:
         conn.execute(
             text("UPDATE user_vocab SET next_review_at = NULL WHERE status = 'mastered'")
         )
+        # 模型配置：API Key 改存数据库（api_key 列），旧钥匙串数据自动迁入
+        model_columns = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(model_configs)"))
+        }
+        if "api_key" not in model_columns:
+            conn.execute(text("ALTER TABLE model_configs ADD COLUMN api_key TEXT"))
+    with Session(engine) as session:
+        for config in session.scalars(select(ModelConfig)).all():
+            if not config.api_key and config.secret_ref:
+                config.api_key = get_api_key(config.secret_ref)
+                if config.api_key:
+                    config.secret_ref = None  # 已迁入数据库，解除钥匙串引用
+        session.commit()
 
 
 @asynccontextmanager
@@ -914,7 +927,7 @@ def model_payload(config: ModelConfig) -> dict:
         "max_tokens": config.max_tokens,
         "enable_thinking": config.enable_thinking,
         "is_default": config.is_default,
-        "has_api_key": bool(config.secret_ref),
+        "has_api_key": bool(config.api_key),
         "last_test_status": config.last_test_status,
         "last_test_message": config.last_test_message,
         "last_tested_at": config.last_tested_at.isoformat()
@@ -952,15 +965,9 @@ def create_model_config(
         max_tokens=body.max_tokens,
         enable_thinking=body.enable_thinking,
         is_default=body.is_default,
+        api_key=body.api_key,
     )
     session.add(config)
-    session.flush()
-    if body.api_key:
-        config.secret_ref = f"model-config-{config.id}"
-        try:
-            set_api_key(config.secret_ref, body.api_key)
-        except Exception as exc:
-            raise HTTPException(500, "无法写入系统钥匙串") from exc
     session.commit()
     return model_payload(config)
 
@@ -991,11 +998,7 @@ def update_model_config(
     config.enable_thinking = body.enable_thinking
     config.is_default = body.is_default
     if body.api_key:
-        config.secret_ref = config.secret_ref or f"model-config-{config.id}"
-        try:
-            set_api_key(config.secret_ref, body.api_key)
-        except Exception as exc:
-            raise HTTPException(500, "无法写入系统钥匙串") from exc
+        config.api_key = body.api_key  # 有值才覆盖，留空表示保持不变
     session.commit()
     return model_payload(config)
 
@@ -1007,7 +1010,6 @@ def remove_model_config(
     config = session.get(ModelConfig, config_id)
     if not config:
         raise HTTPException(404, "模型配置不存在")
-    delete_api_key(config.secret_ref)
     session.delete(config)
     session.commit()
     return {"deleted": True}
