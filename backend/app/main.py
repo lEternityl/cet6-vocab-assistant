@@ -134,6 +134,17 @@ def run_migrations() -> None:
             conn.execute(text("ALTER TABLE model_configs ADD COLUMN api_key TEXT"))
         # 钥匙串方案已移除，清掉历史遗留的引用字段
         conn.execute(text("UPDATE model_configs SET secret_ref = NULL"))
+        # 单模型方案：保留最先配好 Key 的一个（都无 Key 则保留最早的），翻译与问答共用
+        conn.execute(
+            text(
+                "DELETE FROM model_configs WHERE id <> ("
+                " SELECT COALESCE(MIN(CASE WHEN api_key IS NOT NULL THEN id END), MIN(id))"
+                " FROM model_configs)"
+            )
+        )
+        conn.execute(
+            text("UPDATE model_configs SET task_type = 'both', is_default = 1")
+        )
 
 
 @asynccontextmanager
@@ -1116,6 +1127,7 @@ async def chat(body: ChatRequest, session: Session = Depends(get_db)) -> dict:
             conversation_id=conversation.id, role="user", content=body.message
         )
     )
+    session.flush()  # autoflush 关闭，需显式落库后历史查询才能查到本条消息
     history = session.scalars(
         select(AIMessage)
         .where(AIMessage.conversation_id == conversation.id)
@@ -1126,7 +1138,8 @@ async def chat(body: ChatRequest, session: Session = Depends(get_db)) -> dict:
         {
             "role": "system",
             "content": (
-                "你是大学英语六级阅读老师。结合给定上下文回答语法、词汇、翻译和篇章问题。"
+                "你是大学英语六级助教，回答语法、词汇、翻译和篇章问题。"
+                "直接输出内容，不要开场白和客套话，用词精炼。"
                 "如果上下文不足，应明确说明，不要编造。"
             ),
         }

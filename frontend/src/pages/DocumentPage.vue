@@ -2,7 +2,6 @@
 import {
   ArrowLeft,
   BookMarked,
-  Bot,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -11,14 +10,12 @@ import {
   FileSearch,
   Layers3,
   LoaderCircle,
-  MessageCircle,
   Search,
   SlidersHorizontal,
   Sparkles,
   Volume2,
   X,
 } from "lucide-vue-next";
-import MarkdownIt from "markdown-it";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
@@ -48,9 +45,6 @@ const detailLoading = ref(false);
 const translating = ref(false);
 const blocks = ref([]);
 const blocksLoading = ref(false);
-const chatQuestion = ref("");
-const chatReply = ref("");
-const chatting = ref(false);
 const statusUpdating = ref(new Set());
 let searchTimer;
 
@@ -60,13 +54,6 @@ const studyOrder = ref("frequency");
 const studyDuration = ref(20);
 const customDuration = ref("");
 const durationPresets = [0, 15, 20, 30, 45, 60];
-
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-  typographer: true,
-});
 
 const typeLabels = {
   passage: "阅读正文",
@@ -84,9 +71,6 @@ const includedBlocks = computed(() => blocks.value.filter((block) => block.is_in
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
 const pageStart = computed(() => (total.value ? (page.value - 1) * pageSize + 1 : 0));
 const pageEnd = computed(() => Math.min(page.value * pageSize, total.value));
-const renderedChatReply = computed(() =>
-  chatReply.value ? markdown.render(chatReply.value) : "",
-);
 const filterSummary = computed(() => {
   const parts = [];
   parts.push(scope.value === "study" ? "学习范围" : "全文");
@@ -180,7 +164,6 @@ const loadBlocks = async () => {
 const openWord = async (word) => {
   selected.value = { word, examples: [] };
   detailLoading.value = true;
-  chatReply.value = "";
   try {
     const result = await api.get(`/api/word-stats/${word.id}/examples`);
     selected.value = { word: { ...word, ...result.word }, examples: result.examples };
@@ -216,24 +199,6 @@ const translateExamples = async () => {
     store.notify(error.message, "error");
   } finally {
     translating.value = false;
-  }
-};
-
-const askAI = async () => {
-  if (!chatQuestion.value.trim() || !selected.value?.examples.length) return;
-  chatting.value = true;
-  try {
-    const result = await api.post("/api/chat", {
-      message: chatQuestion.value,
-      question_set_id: Number(documentId),
-      sentence_id: selected.value.examples[0].id,
-    });
-    chatReply.value = result.reply;
-    chatQuestion.value = "";
-  } catch (error) {
-    store.notify(error.message, "error");
-  } finally {
-    chatting.value = false;
   }
 };
 
@@ -580,23 +545,6 @@ onMounted(async () => {
               <p v-if="example.translation" class="translation">{{ example.translation }}</p>
               <p v-else class="translation pending">尚未翻译</p>
             </article>
-          </div>
-
-          <div class="ask-panel">
-            <div class="ask-title"><Bot :size="18" /><strong>问 AI</strong><span>结合当前语境</span></div>
-            <form @submit.prevent="askAI">
-              <textarea v-model="chatQuestion" rows="2" placeholder="例如：这里为什么使用过去分词？"></textarea>
-              <button :disabled="chatting || !chatQuestion.trim()" aria-label="发送问题">
-                <LoaderCircle v-if="chatting" class="spin" :size="17" />
-                <MessageCircle v-else :size="17" />
-              </button>
-            </form>
-            <div
-              v-if="chatReply"
-              class="ai-reply markdown-content"
-              aria-live="polite"
-              v-html="renderedChatReply"
-            ></div>
           </div>
         </aside>
       </div>

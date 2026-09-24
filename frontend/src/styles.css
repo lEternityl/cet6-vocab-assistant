@@ -262,7 +262,7 @@ p, h1, h2, h3 { margin-top: 0; }
 .card-translate-button:focus-visible { outline: 2px solid var(--coral); outline-offset: 2px; }
 .card-translate-button:disabled { cursor: wait; opacity: .68; }
 .card-translated { display: inline-flex; align-items: center; gap: 5px; color: #4e846b; letter-spacing: 0; }
-.card-examples { flex: 1; display: grid; align-content: start; gap: 12px; margin-top: 4px; padding-bottom: 36px; overflow-y: auto; }
+.card-examples { flex: 1; min-height: 0; display: grid; align-content: start; gap: 12px; margin-top: 4px; padding-bottom: 12px; overflow-y: auto; }
 .card-examples article { padding: 13px 14px; border-left: 3px solid var(--coral); background: #fff; }
 .card-examples p { margin: 0; font-family: Georgia, serif; font-size: 12px; line-height: 1.55; }
 .card-examples small { display: block; margin-top: 7px; color: #74848c; line-height: 1.5; }
@@ -297,6 +297,8 @@ p, h1, h2, h3 { margin-top: 0; }
 .settings-header { align-items: center; }
 .model-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
 .model-card { padding: 20px; border: 1px solid var(--line); border-radius: 17px; background: var(--paper); }
+.model-card.empty { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 34px; }
+.model-card.empty p { margin: 0; color: #75838a; font-size: 13px; }
 .model-card > header { display: grid; grid-template-columns: 42px 1fr auto; gap: 11px; align-items: center; }
 .model-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: var(--coral-soft); color: var(--coral); }
 .model-card h2 { margin: 0; font-size: 14px; }
@@ -445,6 +447,30 @@ p, h1, h2, h3 { margin-top: 0; }
 .front-word-row { display: flex; align-items: center; gap: 16px; }
 .example-row { display: flex; align-items: flex-start; gap: 8px; }
 .example-row p { flex: 1; }
+.example-actions { display: flex; align-items: center; gap: 6px; }
+.speak-button.small.analyze { border-color: #cfc7b8; color: #8a7f6f; }
+.speak-button.small.analyze:hover:not(:disabled) { background: #f4ede3; color: #a34729; }
+.speak-button.small.analyze:disabled { cursor: wait; opacity: .55; }
+
+/* 学习卡片 AI 助手：快捷操作 + 提问 + 回复 */
+.card-ai-helper { margin-top: 6px; padding-top: 10px; border-top: 1px dashed #ddd8cd; }
+.ai-quick-row { display: flex; align-items: center; gap: 8px; }
+.ai-memo-button { flex-shrink: 0; }
+.ai-ask-form { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ai-ask-form input { flex: 1; min-width: 0; padding: 7px 12px; border: 1px solid #ddd8cd; border-radius: 999px; background: #fff; color: var(--navy); font-family: inherit; font-size: 11px; transition: border-color .2s; }
+.ai-ask-form input:focus { outline: none; border-color: var(--coral); }
+.ai-ask-form input:disabled { opacity: .6; }
+.ai-ask-form button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex-shrink: 0; border: 0; border-radius: 50%; background: #1b2b38; color: #f8f5ed; cursor: pointer; transition: .2s; }
+.ai-ask-form button:hover:not(:disabled) { background: #a34729; }
+.ai-ask-form button:disabled { cursor: wait; opacity: .5; }
+.ai-loading-hint { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: #9a8b80; font-size: 10px; font-weight: 700; }
+.card-ai-reply { max-height: 168px; overflow-y: auto; margin-top: 10px; padding: 12px 14px; border: 1px solid #ddd8cd; border-radius: 12px; background: #fff; color: #43525c; font-size: 11px; line-height: 1.7; }
+.card-ai-reply h1, .card-ai-reply h2, .card-ai-reply h3, .card-ai-reply h4 { color: #1b2b38; }
+.card-ai-reply strong { color: #1b2b38; }
+.card-ai-reply em { color: #a34729; }
+.card-ai-reply li::marker { color: var(--coral); }
+.card-ai-reply code { background: #f4ede3; color: #a34729; }
+.card-ai-reply blockquote { border-left-color: var(--coral); background: #f8f5ed; color: #5d6d78; }
 .example-labels .speak-button { margin-left: auto; }
 .drawer-word-row { display: flex; align-items: center; gap: 10px; }
 .study-speak-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border: 0; border-radius: 999px; background: rgba(255,255,255,.08); color: #d7e0e6; font-size: 10px; font-weight: 750; cursor: pointer; transition: .2s; }

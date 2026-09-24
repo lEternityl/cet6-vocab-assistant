@@ -1,9 +1,11 @@
 <script setup>
 import {
   ArrowLeft,
+  Bot,
   Brain,
   Check,
   LoaderCircle,
+  MessageCircle,
   RotateCcw,
   Sparkles,
   Timer,
@@ -11,6 +13,7 @@ import {
   VolumeX,
   X,
 } from "lucide-vue-next";
+import MarkdownIt from "markdown-it";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
@@ -159,6 +162,7 @@ const answer = async (known) => {
     currentIndex.value += 1;
     flipped.value = false;
     revealed.value = false;
+    resetAI();
   } catch (error) {
     store.notify(error.message, "error");
   } finally {
@@ -173,6 +177,63 @@ const restartUnknown = () => {
   unknownCount.value = 0;
   flipped.value = false;
   revealed.value = false;
+  resetAI();
+};
+
+// 卡片 AI 助手：长难句分析 + 帮助记单词 + 自由提问
+const markdown = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true,
+  typographer: true,
+});
+const aiQuestion = ref("");
+const aiReply = ref("");
+const aiLoading = ref(false);
+const renderedAiReply = computed(() =>
+  aiReply.value ? markdown.render(aiReply.value) : "",
+);
+
+const resetAI = () => {
+  aiQuestion.value = "";
+  aiReply.value = "";
+};
+
+const askAI = async (message) => {
+  if (aiLoading.value || !current.value) return;
+  aiLoading.value = true;
+  try {
+    const result = await api.post("/api/chat", {
+      message,
+      question_set_id: documentId,
+    });
+    aiReply.value = result.reply;
+  } catch (error) {
+    store.notify(error.message, "error");
+  } finally {
+    aiLoading.value = false;
+  }
+};
+
+const analyzeExample = (example) =>
+  askAI(
+    `分析这个句子，按以下三部分输出，用 markdown：\n` +
+      "**1. 核心词汇与短语**：逐行列出句中的重点词汇/短语，标注词性与中文释义，并简要点出它在句中的含义或作用。\n" +
+      "**2. 句法结构分析**：先指出整句结构（并列/复合/主从等），再逐个分句拆解：主语、谓语、宾语/表语、各类修饰成分（后置定语、状语、从句等），从句需指明引导词及其在句中的作用，代词需指明指代对象。\n" +
+      "**3. 参考译文**：给出流畅自然的中文翻译。\n\n" +
+      `句子：${example.text}`,
+  );
+
+const helpMemorize = () => {
+  const card = current.value;
+  if (!card) return;
+  const context = (card.examples || []).map((ex, i) => `${i + 1}. ${ex.text}`).join("\n");
+  askAI(
+    `帮我记住英语单词「${card.lemma}」（${card.pos_label || card.pos}），250 字以内，格式如下：\n` +
+      "**词义**：一句话\n**记法**：词根词缀拆解或联想记忆，选更管用的\n**搭配**：3 个考试高频搭配\n**易混**：2 个近形/近义词，各一句话辨析\n" +
+      (context ? `\n原文语境：\n${context}` : "") +
+      "\n\n直接输出内容，不要开场白。",
+  );
 };
 
 const filterSummary = computed(() => {
@@ -352,22 +413,71 @@ onUnmounted(() => {
                 <article v-for="example in current.examples" :key="example.id">
                   <div class="example-row">
                     <p>{{ example.text }}</p>
-                    <button
-                      v-if="speechSupported"
-                      class="speak-button small"
-                      :class="{ active: speakingId === `ex-${example.id}` }"
-                      aria-label="朗读例句"
-                      @click.stop="speak(example.text, { id: `ex-${example.id}`, rate: 0.9 })"
-                      @keydown.stop
-                    >
-                      <Volume2 :size="13" />
-                    </button>
+                    <div class="example-actions">
+                      <button
+                        v-if="speechSupported"
+                        class="speak-button small"
+                        :class="{ active: speakingId === `ex-${example.id}` }"
+                        aria-label="朗读例句"
+                        @click.stop="speak(example.text, { id: `ex-${example.id}`, rate: 0.9 })"
+                        @keydown.stop
+                      >
+                        <Volume2 :size="13" />
+                      </button>
+                      <button
+                        class="speak-button small analyze"
+                        :class="{ active: aiLoading }"
+                        :disabled="aiLoading"
+                        title="AI 分析这个长难句"
+                        aria-label="AI 分析这个长难句"
+                        @click.stop="analyzeExample(example)"
+                        @keydown.stop
+                      >
+                        <Bot :size="13" />
+                      </button>
+                    </div>
                   </div>
                   <small v-if="revealed && example.translation">{{ example.translation }}</small>
                   <small v-else-if="revealed" class="translation-pending">尚未翻译</small>
                 </article>
               </div>
-              <span class="flip-hint"><Sparkles :size="15" /> {{ revealed ? "点击返回单词面" : "点击显示释义与翻译" }}</span>
+
+              <div class="card-ai-helper" @click.stop>
+                <div class="ai-quick-row">
+                  <button
+                    class="card-translate-button ai-memo-button"
+                    :disabled="aiLoading"
+                    @click="helpMemorize"
+                    @keydown.stop
+                  >
+                    <LoaderCircle v-if="aiLoading" class="spin" :size="13" />
+                    <Bot v-else :size="13" />
+                    帮我记住它
+                  </button>
+                  <form class="ai-ask-form" @submit.prevent="aiQuestion.trim() && askAI(aiQuestion)">
+                    <input
+                      v-model="aiQuestion"
+                      placeholder="补充提问…"
+                      :disabled="aiLoading"
+                      maxlength="400"
+                      @keydown.stop
+                    />
+                    <button type="submit" :disabled="aiLoading || !aiQuestion.trim()" aria-label="发送问题">
+                      <LoaderCircle v-if="aiLoading" class="spin" :size="15" />
+                      <MessageCircle v-else :size="15" />
+                    </button>
+                  </form>
+                </div>
+                <div v-if="aiLoading && !aiReply" class="ai-loading-hint">
+                  <LoaderCircle class="spin" :size="13" /> AI 思考中…
+                </div>
+                <div
+                  v-else-if="aiReply"
+                  class="card-ai-reply markdown-content"
+                  aria-live="polite"
+                  v-html="renderedAiReply"
+                ></div>
+              </div>
             </section>
           </div>
         </div>
